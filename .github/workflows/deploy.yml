@@ -14,6 +14,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # environment: production   # <- uncomment if you’re using an Environment secret
 
     steps:
       - name: Checkout
@@ -38,31 +39,30 @@ jobs:
           set -euo pipefail
 
           # Required fields
-          URL=$(yq -r '.url // empty' config.yml)
-          TYPE=$(yq -r '.type // empty' config.yml)
+          URL=$(yq -r '.url // ""'  config.yml)
+          TYPE=$(yq -r '.type // ""' config.yml)
 
-          if [[ -z "${URL}" ]]; then
+          if [[ -z "$URL" ]]; then
             echo "::error::config.yml is missing required key: url"
             exit 1
           fi
-          if [[ -z "${TYPE}" ]]; then
+          if [[ -z "$TYPE" ]]; then
             echo "::error::config.yml is missing required key: type"
             exit 1
           fi
 
-          # Optional fields
-          DESC=$(yq -r 'has("description")   and .description   != null   then .description   else "" end' config.yml)
-          META=$(yq -r 'has("metadata")      and .metadata      != null   then .metadata      else "" end' config.yml)
-          # pooling_enabled may be boolean; emit as empty if not set
-          POOL=$(yq -r 'has("pooling_enabled") and .pooling_enabled != null then (.pooling_enabled|tostring) else "" end' config.yml)
+          # Optional fields (empty string if absent)
+          DESC=$(yq -r '.description // ""' config.yml)
+          META=$(yq -r '.metadata // ""'    config.yml)
+          # pooling_enabled may be boolean; stringify if present, else empty
+          POOL=$(yq -r 'if has("pooling_enabled") and .pooling_enabled != null then (.pooling_enabled|tostring) else "" end' config.yml)
 
-          # Output for later steps
           {
-            echo "url<<__EOF__";  echo -n "${URL}";  echo; echo "__EOF__"
-            echo "type=${TYPE}"
-            echo "desc<<__EOF__"; echo -n "${DESC}"; echo; echo "__EOF__"
-            echo "meta<<__EOF__"; echo -n "${META}"; echo; echo "__EOF__"
-            echo "pool=${POOL}"
+            echo "url<<__EOF__";  echo -n "$URL";  echo; echo "__EOF__"
+            echo "type=$TYPE"
+            echo "desc<<__EOF__"; echo -n "$DESC"; echo; echo "__EOF__"
+            echo "meta<<__EOF__"; echo -n "$META"; echo; echo "__EOF__"
+            echo "pool=$POOL"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build traffic policy from policy.yml
@@ -70,9 +70,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Convert YAML -> compact JSON on a single line
+          # Convert YAML -> compact JSON (single line)
           POLICY_JSON=$(yq -o=json -I=0 '.' policy.yml | tr -d '\n')
-          # Save to output
           {
             echo "json<<__EOF__"
             echo -n "${POLICY_JSON}"
@@ -82,13 +81,13 @@ jobs:
 
       - name: Call ngrok API (create Endpoint)
         env:
-          TOKEN: ${{ secrets.NGROK_API_TOKEN }}
+          TOKEN: ${{ secrets.NGROK_API_TOKEN }}   # Use an Environment or Repo secret with this name
         shell: bash
         run: |
           set -euo pipefail
 
           # Base args (required)
-          DATA=( 
+          DATA=(
             --data-urlencode "url=${{ steps.cfg.outputs.url }}"
             --data-urlencode "type=${{ steps.cfg.outputs.type }}"
             --data-urlencode "traffic_policy=${{ steps.policy.outputs.json }}"
@@ -102,15 +101,10 @@ jobs:
             DATA+=( --data-urlencode "metadata=${{ steps.cfg.outputs.meta }}" )
           fi
           if [[ -n "${{ steps.cfg.outputs.pool }}" ]]; then
-            # should be "true" or "false" string
             DATA+=( --data-urlencode "pooling_enabled=${{ steps.cfg.outputs.pool }}" )
           fi
 
-          # Debug (masked values are not printed)
-          echo "Posting to ${NGROK_API_URL} with fields:"
-          printf ' - %s\n' "${DATA[@]}"
-
-          # Send request
+          echo "Posting to ${NGROK_API_URL} ..."
           HTTP_CODE=$(
             curl -sS -w "%{http_code}" -o /tmp/resp.json \
               --location "${NGROK_API_URL}" \
@@ -121,7 +115,7 @@ jobs:
           )
 
           echo "HTTP ${HTTP_CODE}"
-          cat /tmp/resp.json | jq -C . || cat /tmp/resp.json
+          (jq -C . /tmp/resp.json || cat /tmp/resp.json)
 
           if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
             echo "::error::ngrok API returned HTTP ${HTTP_CODE}"
