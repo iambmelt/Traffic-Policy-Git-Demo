@@ -6,7 +6,8 @@ This repo demonstrates a GitHub Action that reads config from versioned files an
 
 * Triggers on `deployment` branch pushes
 * Validates `config.yml` (requires `url`, `type`; supports `description`, `metadata`, `pooling_enabled`)
-* Reads `policy.yml`, converts it to JSON, and sends it as `traffic_policy`
+* Reads the `policy.yml` or `policy.json` file, converts it to JSON, and sends it as `traffic_policy`.
+  - Optionally, you may call this file `policy.yaml`.
 * Posts a form-encoded request to `https://api.ngrok.com/endpoints`
 
 ## Quick start
