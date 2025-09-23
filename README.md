@@ -61,5 +61,4 @@ on_http_request:
 ## Notes
 
 * `policy.yml` must be valid YAML that converts to the structure ngrok expects for `traffic_policy`.
-* For demos that **update** an existing endpoint instead of creating a new one each push, you can adapt the workflow to `PATCH` by ID or look up by `metadata`.
 * You must enable "Allow GitHub Actions to create and approve pull requests" under **Settings** > **Actions** > **General** > **Workflow permissions**
