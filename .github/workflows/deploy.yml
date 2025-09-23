@@ -1,11 +1,12 @@
-name: Create ngrok Endpoint (deployment branch)
+name: Create or Update ngrok Endpoint (deployment branch)
 
 on:
   push:
     branches: [ deployment ]
 
 permissions:
-  contents: read
+  contents: write         # to push a branch with the config change
+  pull-requests: write    # to open a PR
 
 env:
   NGROK_API_URL: https://api.ngrok.com/endpoints
@@ -17,8 +18,10 @@ jobs:
     # environment: production   # <- uncomment if you’re using an Environment secret
 
     steps:
-      - name: Checkout
+      - name: Checkout (deployment branch)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Ensure required files exist
         run: |
@@ -57,8 +60,8 @@ jobs:
           # Optional fields (empty string if absent)
           DESC=$(yq -r '.description // ""' config.yml)
           META=$(yq -r '.metadata // ""'    config.yml)
-          # boolean -> string if present, else ""
           POOL=$(yq -r '(.pooling_enabled // "") | tostring' config.yml)
+          CFG_ID=$(yq -r '.id // ""' config.yml)
 
           {
             echo "url<<__EOF__";  echo -n "$URL";  echo; echo "__EOF__"
@@ -66,44 +69,52 @@ jobs:
             echo "desc<<__EOF__"; echo -n "$DESC"; echo; echo "__EOF__"
             echo "meta<<__EOF__"; echo -n "$META"; echo; echo "__EOF__"
             echo "pool=$POOL"
+            echo "cfg_id=$CFG_ID"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build traffic policy from policy.yml (YAML or JSON -> JSON)
+      - name: Build traffic policy from policy.yml (YAML or JSON -> JSON file)
         id: policy
         shell: bash
         run: |
           set -euo pipefail
-
-          # If file is valid JSON, compact it; otherwise parse YAML -> JSON
           if jq -e . policy.yml >/dev/null 2>&1; then
             jq -c . policy.yml > /tmp/policy.json
           else
             yq -o=json -I=0 '.' policy.yml > /tmp/policy.json
           fi
-
-          # single-line, no trailing newline
           tr -d '\n' < /tmp/policy.json > /tmp/policy.json.tmp && mv /tmp/policy.json.tmp /tmp/policy.json
+          echo "path=/tmp/policy.json" >> "$GITHUB_OUTPUT"
 
-          {
-            echo "path=/tmp/policy.json"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Call ngrok API (create Endpoint)
+      - name: Call ngrok API (create or update endpoint)
+        id: api
         env:
-          TOKEN: ${{ secrets.NGROK_API_TOKEN }}   # Environment or Repo secret
+          TOKEN: ${{ secrets.NGROK_API_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           echo "::add-mask::${TOKEN}"
 
-          # Build args
+          # Decide method & URL + expected status
+          if [[ -n "${{ steps.cfg.outputs.cfg_id }}" ]]; then
+            METHOD="PATCH"
+            URL="${NGROK_API_URL}/${{ steps.cfg.outputs.cfg_id }}"
+            CREATED="false"
+            EXPECTED=200
+            EXPECTED_LABEL="200 OK"
+          else
+            METHOD="POST"
+            URL="${NGROK_API_URL}"
+            CREATED="true"
+            EXPECTED=201
+            EXPECTED_LABEL="201 Created"
+          fi
+
+          # Build form data
           DATA=(
             --data-urlencode "url=${{ steps.cfg.outputs.url }}"
             --data-urlencode "type=${{ steps.cfg.outputs.type }}"
-            # Read JSON from file so we avoid shell-quoting issues
             --data-urlencode "traffic_policy@${{ steps.policy.outputs.path }}"
           )
-
           if [[ -n "${{ steps.cfg.outputs.desc }}" ]]; then
             DATA+=( --data-urlencode "description=${{ steps.cfg.outputs.desc }}" )
           fi
@@ -114,24 +125,21 @@ jobs:
             DATA+=( --data-urlencode "pooling_enabled=${{ steps.cfg.outputs.pool }}" )
           fi
 
-          # ----- Preview (token redacted) -----
+          # Preview (token redacted)
           {
-            echo "About to run this request:"
-            printf "curl --location %q \\\n" "${NGROK_API_URL}"
+            echo "About to run this request (expecting ${EXPECTED_LABEL}):"
+            printf "curl --request %s --location %q \\\n" "$METHOD" "$URL"
             printf "  --header %q \\\n" "Content-Type: application/x-www-form-urlencoded"
             printf "  --header %q \\\n" "Ngrok-Version: ${NGROK_API_VERSION}"
             printf "  --header %q \\\n" "Authorization: Bearer ***REDACTED***"
-            for arg in "${DATA[@]}"; do
-              printf "  %q \\\n" "$arg"
-            done
+            for arg in "${DATA[@]}"; do printf "  %q \\\n" "$arg"; done
             echo "  --silent --show-error --write-out '%{http_code}'"
           } 1>&2
-          # ------------------------------------
 
-          # Send request
+          # Execute
           HTTP_CODE=$(
-            curl -sS -w "%{http_code}" -o /tmp/resp.json \
-              --location "${NGROK_API_URL}" \
+            curl -sS -X "$METHOD" -w "%{http_code}" -o /tmp/resp.json \
+              --location "$URL" \
               --header "Content-Type: application/x-www-form-urlencoded" \
               --header "Ngrok-Version: ${NGROK_API_VERSION}" \
               --header "Authorization: Bearer ${TOKEN}" \
@@ -141,7 +149,54 @@ jobs:
           echo "HTTP ${HTTP_CODE}"
           (jq -C . /tmp/resp.json || cat /tmp/resp.json)
 
-          if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
-            echo "::error::ngrok API returned HTTP ${HTTP_CODE}"
+          # Strict status check
+          if [[ "${HTTP_CODE}" -ne "${EXPECTED}" ]]; then
+            echo "::error::Unexpected status. Got ${HTTP_CODE}, expected ${EXPECTED_LABEL} for ${METHOD}."
             exit 1
           fi
+
+          NEW_ID=$(jq -r '.id // empty' /tmp/resp.json)
+          {
+            echo "method=${METHOD}"
+            echo "created=${CREATED}"
+            echo "id=${NEW_ID}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare commit with new id on a branch from main
+        id: commit
+        if: steps.api.outputs.created == 'true' && steps.api.outputs.id != ''
+        env:
+          NEW_ID: ${{ steps.api.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+
+          BRANCH="add-endpoint-id-${NEW_ID}"
+          git checkout -B "$BRANCH" origin/main
+
+          # Put id at the very top of config.yml (remove any existing id if present)
+          yq 'del(.id)' config.yml > /tmp/config.noid.yml || cp config.yml /tmp/config.noid.yml
+          printf "id: %s\n" "$NEW_ID" > config.yml
+          cat /tmp/config.noid.yml >> config.yml
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add config.yml
+          git commit -m "chore: record ngrok endpoint id ${NEW_ID} in config.yml"
+          git push -u origin "$BRANCH"
+
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR to main
+        if: steps.api.outputs.created == 'true' && steps.api.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh pr create \
+            --base main \
+            --head "${{ steps.commit.outputs.branch }}" \
+            --title "chore: add ngrok endpoint id to config.yml" \
+            --body "This PR adds the newly created ngrok endpoint id to the top of **config.yml**.\n\nGenerated automatically by the deployment workflow."
