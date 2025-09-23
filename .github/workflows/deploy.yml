@@ -5,8 +5,8 @@ on:
     branches: [ deployment ]
 
 permissions:
-  contents: write         # to push a branch with the config change
-  pull-requests: write    # to open a PR
+  contents: write
+  pull-requests: write
 
 env:
   NGROK_API_URL: https://api.ngrok.com/endpoints
@@ -57,7 +57,7 @@ jobs:
             exit 1
           fi
 
-          # Optional fields (empty string if absent)
+          # Optional fields
           DESC=$(yq -r '.description // ""' config.yml)
           META=$(yq -r '.metadata // ""'    config.yml)
           POOL=$(yq -r '(.pooling_enabled // "") | tostring' config.yml)
@@ -94,7 +94,7 @@ jobs:
           set -euo pipefail
           echo "::add-mask::${TOKEN}"
 
-          # Decide method & URL + expected status
+          # Decide method, URL, and expected status
           if [[ -n "${{ steps.cfg.outputs.cfg_id }}" ]]; then
             METHOD="PATCH"
             URL="${NGROK_API_URL}/${{ steps.cfg.outputs.cfg_id }}"
@@ -109,12 +109,18 @@ jobs:
             EXPECTED_LABEL="201 Created"
           fi
 
-          # Build form data
+          # Build form data (always include url & traffic_policy)
           DATA=(
             --data-urlencode "url=${{ steps.cfg.outputs.url }}"
-            --data-urlencode "type=${{ steps.cfg.outputs.type }}"
             --data-urlencode "traffic_policy@${{ steps.policy.outputs.path }}"
           )
+
+          # Include type ONLY on POST (create)
+          if [[ "${METHOD}" == "POST" ]]; then
+            DATA+=( --data-urlencode "type=${{ steps.cfg.outputs.type }}" )
+          fi
+
+          # Optional fields if present
           if [[ -n "${{ steps.cfg.outputs.desc }}" ]]; then
             DATA+=( --data-urlencode "description=${{ steps.cfg.outputs.desc }}" )
           fi
