@@ -74,19 +74,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          # If file is valid JSON, compact it; otherwise parse YAML -> JSON
           if jq -e . policy.yml >/dev/null 2>&1; then
-            POLICY_JSON=$(jq -c . policy.yml)
+            jq -c . policy.yml > /tmp/policy.json
           else
-            POLICY_JSON=$(yq -o=json -I=0 '.' policy.yml)
+            yq -o=json -I=0 '.' policy.yml > /tmp/policy.json
           fi
 
-          POLICY_JSON=$(echo -n "$POLICY_JSON" | tr -d '\n')
+          # single-line, no trailing newline
+          tr -d '\n' < /tmp/policy.json > /tmp/policy.json.tmp && mv /tmp/policy.json.tmp /tmp/policy.json
 
           {
-            echo "json<<__EOF__"
-            echo -n "${POLICY_JSON}"
-            echo
-            echo "__EOF__"
+            echo "path=/tmp/policy.json"
           } >> "$GITHUB_OUTPUT"
 
       - name: Call ngrok API (create Endpoint)
@@ -95,18 +94,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # Ensure token is masked in logs even if echoed accidentally
           echo "::add-mask::${TOKEN}"
 
-          # Base args (required)
+          # Build args
           DATA=(
             --data-urlencode "url=${{ steps.cfg.outputs.url }}"
             --data-urlencode "type=${{ steps.cfg.outputs.type }}"
-            --data-urlencode "traffic_policy=${{ steps.policy.outputs.json }}"
+            # Read JSON from file so we avoid shell-quoting issues
+            --data-urlencode "traffic_policy@${{ steps.policy.outputs.path }}"
           )
 
-          # Optional fields if present (non-empty)
           if [[ -n "${{ steps.cfg.outputs.desc }}" ]]; then
             DATA+=( --data-urlencode "description=${{ steps.cfg.outputs.desc }}" )
           fi
@@ -117,7 +114,7 @@ jobs:
             DATA+=( --data-urlencode "pooling_enabled=${{ steps.cfg.outputs.pool }}" )
           fi
 
-          # ----- Preview the exact curl command (token redacted) -----
+          # ----- Preview (token redacted) -----
           {
             echo "About to run this request:"
             printf "curl --location %q \\\n" "${NGROK_API_URL}"
@@ -125,12 +122,11 @@ jobs:
             printf "  --header %q \\\n" "Ngrok-Version: ${NGROK_API_VERSION}"
             printf "  --header %q \\\n" "Authorization: Bearer ***REDACTED***"
             for arg in "${DATA[@]}"; do
-              # print each --data-urlencode arg on its own line, safely escaped
               printf "  %q \\\n" "$arg"
             done
             echo "  --silent --show-error --write-out '%{http_code}'"
-          } 1>&2  # send preview to stderr so it doesn't interfere with parsing below
-          # -----------------------------------------------------------
+          } 1>&2
+          # ------------------------------------
 
           # Send request
           HTTP_CODE=$(
