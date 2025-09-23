@@ -26,11 +26,14 @@ jobs:
           test -f config.yml || { echo "::error::Missing config.yml in branch"; exit 1; }
           test -f policy.yml || { echo "::error::Missing policy.yml in branch"; exit 1; }
 
-      - name: Install yq (YAML processor)
+      - name: Install tools (yq, jq)
         run: |
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y -qq jq >/dev/null
           yq --version
+          jq --version
 
       - name: Validate and read config.yml
         id: cfg
@@ -65,13 +68,23 @@ jobs:
             echo "pool=$POOL"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build traffic policy from policy.yml
+      - name: Build traffic policy from policy.yml (YAML or JSON -> JSON)
         id: policy
         shell: bash
         run: |
           set -euo pipefail
-          # Convert YAML -> compact JSON (single line)
-          POLICY_JSON=$(yq -o=json -I=0 '.' policy.yml | tr -d '\n')
+
+          # If file is valid JSON, use jq to compact it.
+          # Otherwise, treat as YAML and convert with yq.
+          if jq -e . policy.yml >/dev/null 2>&1; then
+            POLICY_JSON=$(jq -c . policy.yml)
+          else
+            POLICY_JSON=$(yq -o=json -I=0 '.' policy.yml)
+          fi
+
+          # Ensure single line (defense-in-depth)
+          POLICY_JSON=$(echo -n "$POLICY_JSON" | tr -d '\n')
+
           {
             echo "json<<__EOF__"
             echo -n "${POLICY_JSON}"
