@@ -5,8 +5,8 @@ on:
     branches: [ deployment ]
 
 permissions:
-  contents: write         # push + merge
-  pull-requests: write    # create PR + approve
+  contents: write
+  pull-requests: write
 
 env:
   NGROK_API_URL: https://api.ngrok.com/endpoints
@@ -198,15 +198,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PR_JSON=$(gh pr create \
+          # Create PR (no --json; compatible with older gh versions)
+          gh pr create \
             --base main \
             --head "${{ steps.commit.outputs.branch }}" \
             --title "chore: add ngrok endpoint id to config.yml" \
             --body "This PR adds the newly created ngrok endpoint id to the top of **config.yml**.\n\nGenerated automatically by the deployment workflow." \
-            --json number,url)
-          echo "$PR_JSON"
-          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
-          PR_URL=$(echo "$PR_JSON" | jq -r '.url')
+            || echo "PR may already exist, continuing."
+
+          # Discover PR number via REST API (no gh --json usage)
+          OWNER="${GITHUB_REPOSITORY%/*}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          HEAD="${OWNER}:${{ steps.commit.outputs.branch }}"
+          PR_JSON=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/pulls?head=${HEAD}&state=open&per_page=1")
+          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.[0].number // empty')
+          PR_URL=$(echo "$PR_JSON" | jq -r '.[0].html_url // empty')
+
+          if [[ -z "$PR_NUMBER" ]]; then
+            echo "::error::Could not determine PR number"; exit 1
+          fi
+
           {
             echo "number=$PR_NUMBER"
             echo "url=$PR_URL"
