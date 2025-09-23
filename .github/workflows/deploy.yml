@@ -1,0 +1,129 @@
+name: Create ngrok Endpoint (deployment branch)
+
+on:
+  push:
+    branches: [ deployment ]
+
+permissions:
+  contents: read
+
+env:
+  NGROK_API_URL: https://api.ngrok.com/endpoints
+  NGROK_API_VERSION: "2"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure required files exist
+        run: |
+          set -e
+          test -f config.yml || { echo "::error::Missing config.yml in branch"; exit 1; }
+          test -f policy.yml || { echo "::error::Missing policy.yml in branch"; exit 1; }
+
+      - name: Install yq (YAML processor)
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Validate and read config.yml
+        id: cfg
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Required fields
+          URL=$(yq -r '.url // empty' config.yml)
+          TYPE=$(yq -r '.type // empty' config.yml)
+
+          if [[ -z "${URL}" ]]; then
+            echo "::error::config.yml is missing required key: url"
+            exit 1
+          fi
+          if [[ -z "${TYPE}" ]]; then
+            echo "::error::config.yml is missing required key: type"
+            exit 1
+          fi
+
+          # Optional fields
+          DESC=$(yq -r 'has("description")   and .description   != null   then .description   else "" end' config.yml)
+          META=$(yq -r 'has("metadata")      and .metadata      != null   then .metadata      else "" end' config.yml)
+          # pooling_enabled may be boolean; emit as empty if not set
+          POOL=$(yq -r 'has("pooling_enabled") and .pooling_enabled != null then (.pooling_enabled|tostring) else "" end' config.yml)
+
+          # Output for later steps
+          {
+            echo "url<<__EOF__";  echo -n "${URL}";  echo; echo "__EOF__"
+            echo "type=${TYPE}"
+            echo "desc<<__EOF__"; echo -n "${DESC}"; echo; echo "__EOF__"
+            echo "meta<<__EOF__"; echo -n "${META}"; echo; echo "__EOF__"
+            echo "pool=${POOL}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build traffic policy from policy.yml
+        id: policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Convert YAML -> compact JSON on a single line
+          POLICY_JSON=$(yq -o=json -I=0 '.' policy.yml | tr -d '\n')
+          # Save to output
+          {
+            echo "json<<__EOF__"
+            echo -n "${POLICY_JSON}"
+            echo
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Call ngrok API (create Endpoint)
+        env:
+          TOKEN: ${{ secrets.NGROK_API_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Base args (required)
+          DATA=( 
+            --data-urlencode "url=${{ steps.cfg.outputs.url }}"
+            --data-urlencode "type=${{ steps.cfg.outputs.type }}"
+            --data-urlencode "traffic_policy=${{ steps.policy.outputs.json }}"
+          )
+
+          # Optional fields if present (non-empty)
+          if [[ -n "${{ steps.cfg.outputs.desc }}" ]]; then
+            DATA+=( --data-urlencode "description=${{ steps.cfg.outputs.desc }}" )
+          fi
+          if [[ -n "${{ steps.cfg.outputs.meta }}" ]]; then
+            DATA+=( --data-urlencode "metadata=${{ steps.cfg.outputs.meta }}" )
+          fi
+          if [[ -n "${{ steps.cfg.outputs.pool }}" ]]; then
+            # should be "true" or "false" string
+            DATA+=( --data-urlencode "pooling_enabled=${{ steps.cfg.outputs.pool }}" )
+          fi
+
+          # Debug (masked values are not printed)
+          echo "Posting to ${NGROK_API_URL} with fields:"
+          printf ' - %s\n' "${DATA[@]}"
+
+          # Send request
+          HTTP_CODE=$(
+            curl -sS -w "%{http_code}" -o /tmp/resp.json \
+              --location "${NGROK_API_URL}" \
+              --header "Content-Type: application/x-www-form-urlencoded" \
+              --header "Ngrok-Version: ${NGROK_API_VERSION}" \
+              --header "Authorization: Bearer ${TOKEN}" \
+              "${DATA[@]}"
+          )
+
+          echo "HTTP ${HTTP_CODE}"
+          cat /tmp/resp.json | jq -C . || cat /tmp/resp.json
+
+          if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
+            echo "::error::ngrok API returned HTTP ${HTTP_CODE}"
+            exit 1
+          fi
