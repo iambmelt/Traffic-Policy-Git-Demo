@@ -74,15 +74,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # If file is valid JSON, use jq to compact it.
-          # Otherwise, treat as YAML and convert with yq.
           if jq -e . policy.yml >/dev/null 2>&1; then
             POLICY_JSON=$(jq -c . policy.yml)
           else
             POLICY_JSON=$(yq -o=json -I=0 '.' policy.yml)
           fi
 
-          # Ensure single line (defense-in-depth)
           POLICY_JSON=$(echo -n "$POLICY_JSON" | tr -d '\n')
 
           {
@@ -94,10 +91,13 @@ jobs:
 
       - name: Call ngrok API (create Endpoint)
         env:
-          TOKEN: ${{ secrets.NGROK_API_TOKEN }}   # Use an Environment or Repo secret with this name
+          TOKEN: ${{ secrets.NGROK_API_TOKEN }}   # Environment or Repo secret
         shell: bash
         run: |
           set -euo pipefail
+
+          # Ensure token is masked in logs even if echoed accidentally
+          echo "::add-mask::${TOKEN}"
 
           # Base args (required)
           DATA=(
@@ -117,7 +117,22 @@ jobs:
             DATA+=( --data-urlencode "pooling_enabled=${{ steps.cfg.outputs.pool }}" )
           fi
 
-          echo "Posting to ${NGROK_API_URL} ..."
+          # ----- Preview the exact curl command (token redacted) -----
+          {
+            echo "About to run this request:"
+            printf "curl --location %q \\\n" "${NGROK_API_URL}"
+            printf "  --header %q \\\n" "Content-Type: application/x-www-form-urlencoded"
+            printf "  --header %q \\\n" "Ngrok-Version: ${NGROK_API_VERSION}"
+            printf "  --header %q \\\n" "Authorization: Bearer ***REDACTED***"
+            for arg in "${DATA[@]}"; do
+              # print each --data-urlencode arg on its own line, safely escaped
+              printf "  %q \\\n" "$arg"
+            done
+            echo "  --silent --show-error --write-out '%{http_code}'"
+          } 1>&2  # send preview to stderr so it doesn't interfere with parsing below
+          # -----------------------------------------------------------
+
+          # Send request
           HTTP_CODE=$(
             curl -sS -w "%{http_code}" -o /tmp/resp.json \
               --location "${NGROK_API_URL}" \
