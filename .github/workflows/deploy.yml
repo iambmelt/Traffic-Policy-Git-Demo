@@ -203,7 +203,7 @@ jobs:
             --base main \
             --head "${{ steps.commit.outputs.branch }}" \
             --title "chore: add ngrok endpoint id to config.yml" \
-            --body "This PR adds the newly created ngrok endpoint id to the top of **config.yml**.\n\nGenerated automatically by the deployment workflow." \
+            --body "This PR adds the newly created ngrok endpoint id to the top of **config.yml**.<br />Generated automatically by the deployment workflow." \
             || echo "PR may already exist, continuing."
 
           # Discover PR number via REST API (no gh --json usage)
@@ -223,14 +223,6 @@ jobs:
             echo "number=$PR_NUMBER"
             echo "url=$PR_URL"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Approve PR
-        if: steps.pr.outputs.number != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh pr review "${{ steps.pr.outputs.number }}" --approve --body "Auto-approval by workflow."
 
       - name: Enable auto-merge (squash) or merge immediately
         if: steps.pr.outputs.number != ''
