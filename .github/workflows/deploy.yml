@@ -54,8 +54,8 @@ jobs:
           # Optional fields (empty string if absent)
           DESC=$(yq -r '.description // ""' config.yml)
           META=$(yq -r '.metadata // ""'    config.yml)
-          # pooling_enabled may be boolean; stringify if present, else empty
-          POOL=$(yq -r 'if has("pooling_enabled") and .pooling_enabled != null then (.pooling_enabled|tostring) else "" end' config.yml)
+          # boolean -> string if present, else ""
+          POOL=$(yq -r '(.pooling_enabled // "") | tostring' config.yml)
 
           {
             echo "url<<__EOF__";  echo -n "$URL";  echo; echo "__EOF__"
