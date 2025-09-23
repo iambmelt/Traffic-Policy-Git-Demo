@@ -5,8 +5,8 @@ on:
     branches: [ deployment ]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: write         # push + merge
+  pull-requests: write    # create PR + approve
 
 env:
   NGROK_API_URL: https://api.ngrok.com/endpoints
@@ -94,7 +94,7 @@ jobs:
           set -euo pipefail
           echo "::add-mask::${TOKEN}"
 
-          # Decide method, URL, and expected status
+          # Decide method, URL, expected status
           if [[ -n "${{ steps.cfg.outputs.cfg_id }}" ]]; then
             METHOD="PATCH"
             URL="${NGROK_API_URL}/${{ steps.cfg.outputs.cfg_id }}"
@@ -109,18 +109,14 @@ jobs:
             EXPECTED_LABEL="201 Created"
           fi
 
-          # Build form data (always include url & traffic_policy)
+          # Build form data (omit type on PATCH)
           DATA=(
             --data-urlencode "url=${{ steps.cfg.outputs.url }}"
             --data-urlencode "traffic_policy@${{ steps.policy.outputs.path }}"
           )
-
-          # Include type ONLY on POST (create)
           if [[ "${METHOD}" == "POST" ]]; then
             DATA+=( --data-urlencode "type=${{ steps.cfg.outputs.type }}" )
           fi
-
-          # Optional fields if present
           if [[ -n "${{ steps.cfg.outputs.desc }}" ]]; then
             DATA+=( --data-urlencode "description=${{ steps.cfg.outputs.desc }}" )
           fi
@@ -195,14 +191,45 @@ jobs:
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Open PR to main
+        id: pr
         if: steps.api.outputs.created == 'true' && steps.api.outputs.id != ''
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          gh pr create \
+          PR_JSON=$(gh pr create \
             --base main \
             --head "${{ steps.commit.outputs.branch }}" \
             --title "chore: add ngrok endpoint id to config.yml" \
-            --body "This PR adds the newly created ngrok endpoint id to the top of **config.yml**.\n\nGenerated automatically by the deployment workflow."
+            --body "This PR adds the newly created ngrok endpoint id to the top of **config.yml**.\n\nGenerated automatically by the deployment workflow." \
+            --json number,url)
+          echo "$PR_JSON"
+          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
+          PR_URL=$(echo "$PR_JSON" | jq -r '.url')
+          {
+            echo "number=$PR_NUMBER"
+            echo "url=$PR_URL"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Approve PR
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr review "${{ steps.pr.outputs.number }}" --approve --body "Auto-approval by workflow."
+
+      - name: Enable auto-merge (squash) or merge immediately
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Try enabling auto-merge (requires repo setting "Allow auto-merge")
+          if gh pr merge "${{ steps.pr.outputs.number }}" --squash --auto --delete-branch; then
+            echo "Auto-merge enabled; PR will merge when checks pass."
+          else
+            echo "Auto-merge not available; attempting immediate squash merge…"
+            gh pr merge "${{ steps.pr.outputs.number }}" --squash --delete-branch
+          fi
