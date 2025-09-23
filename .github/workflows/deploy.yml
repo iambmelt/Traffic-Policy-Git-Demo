@@ -27,7 +27,29 @@ jobs:
         run: |
           set -e
           test -f config.yml || { echo "::error::Missing config.yml in branch"; exit 1; }
-          test -f policy.yml || { echo "::error::Missing policy.yml in branch"; exit 1; }
+
+      - name: Detect policy file (policy.yml / policy.yaml / policy.json)
+        id: policyfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a found=()
+          for f in policy.yml policy.yaml policy.json; do
+            [[ -f "$f" ]] && found+=("$f")
+          done
+
+          if [[ ${#found[@]} -eq 0 ]]; then
+            echo "::error::No policy file found. Add one of: policy.yml, policy.yaml, or policy.json"
+            exit 1
+          fi
+
+          if [[ ${#found[@]} -gt 1 ]]; then
+            echo "::error::Multiple policy files found: ${found[*]}. Keep exactly one."
+            exit 1
+          fi
+
+          echo "Using policy file: ${found[0]}"
+          echo "path=${found[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Install tools (yq, jq)
         run: |
@@ -72,16 +94,22 @@ jobs:
             echo "cfg_id=$CFG_ID"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build traffic policy from policy.yml (YAML or JSON -> JSON file)
+      - name: Build traffic policy JSON from detected file
         id: policy
         shell: bash
         run: |
           set -euo pipefail
-          if jq -e . policy.yml >/dev/null 2>&1; then
-            jq -c . policy.yml > /tmp/policy.json
+          POLICY_SRC='${{ steps.policyfile.outputs.path }}'
+
+          if [[ "$POLICY_SRC" == *.json ]]; then
+            # Validate/compact JSON
+            jq -c . "$POLICY_SRC" > /tmp/policy.json
           else
-            yq -o=json -I=0 '.' policy.yml > /tmp/policy.json
+            # YAML -> JSON
+            yq -o=json -I=0 '.' "$POLICY_SRC" > /tmp/policy.json
           fi
+
+          # single line, no trailing newline
           tr -d '\n' < /tmp/policy.json > /tmp/policy.json.tmp && mv /tmp/policy.json.tmp /tmp/policy.json
           echo "path=/tmp/policy.json" >> "$GITHUB_OUTPUT"
 
@@ -198,7 +226,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Create PR (no --json; compatible with older gh versions)
           gh pr create \
             --base main \
             --head "${{ steps.commit.outputs.branch }}" \
@@ -206,7 +233,6 @@ jobs:
             --body "This PR adds the newly created ngrok endpoint id to the top of **config.yml**.<br />Generated automatically by the deployment workflow." \
             || echo "PR may already exist, continuing."
 
-          # Discover PR number via REST API (no gh --json usage)
           OWNER="${GITHUB_REPOSITORY%/*}"
           REPO="${GITHUB_REPOSITORY#*/}"
           HEAD="${OWNER}:${{ steps.commit.outputs.branch }}"
@@ -230,7 +256,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Try enabling auto-merge (requires repo setting "Allow auto-merge")
           if gh pr merge "${{ steps.pr.outputs.number }}" --squash --auto --delete-branch; then
             echo "Auto-merge enabled; PR will merge when checks pass."
           else
