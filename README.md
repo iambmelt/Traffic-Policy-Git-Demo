@@ -17,13 +17,13 @@ This repo demonstrates a GitHub Action that reads config from versioned files an
    * `NGROK_API_TOKEN` — your ngrok API Bearer token.
 3. Create a branch named **`deployment`** and add these files at the repo root:
 
-**config.yml**
+**config.yml** (may contain either JSON or YAML)
 
 ```yaml
-url: "https://gh-action-test-endpoint.ngrok.dev:443"
+url: "https://example.ngrok.dev:443"
 type: "cloud"
 description: "Created by a GitHub Action"
-metadata: "github.com/iambmelt/Traffic-Policy-Git-Demo"
+metadata: "Some metadata"
 pooling_enabled: false
 ```
 
