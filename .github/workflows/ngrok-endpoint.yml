@@ -281,7 +281,6 @@ jobs:
 
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      # --- PR creation & merge logic copied from the older working version (adapted to BASE_BRANCH/CONFIG_PATH) ---
       - name: Open PR to base branch
         id: pr
         if: steps.api.outputs.created == 'true' && steps.api.outputs.id != ''
@@ -289,7 +288,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           gh pr create \
             --base "${BASE_BRANCH}" \
             --head "${{ steps.commit.outputs.branch }}" \
@@ -301,7 +300,7 @@ jobs:
           REPO="${GITHUB_REPOSITORY#*/}"
           HEAD="${OWNER}:${{ steps.commit.outputs.branch }}"
           PR_JSON=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${OWNER}/${REPO}/pulls?head=${HEAD}&state=open&per_page=1")
+            "https://api.github.com/repos/${OWNER}/${REPO}/pulls?head=${HEAD}&state=open&per_page=1" || true)
           PR_NUMBER=$(echo "$PR_JSON" | jq -r '.[0].number // empty')
           PR_URL=$(echo "$PR_JSON" | jq -r '.[0].html_url // empty')
 
@@ -318,8 +317,9 @@ jobs:
         if: steps.pr.outputs.number != '' && inputs.auto_merge
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           if gh pr merge "${{ steps.pr.outputs.number }}" --squash --auto --delete-branch; then
             echo "Auto-merge enabled; PR will merge when checks pass."
           else
