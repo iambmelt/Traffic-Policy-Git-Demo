@@ -1,7 +1,3 @@
-Here’s a cleaner, higher-level README you can drop into the repo.
-
----
-
 # ngrok Endpoint via GitHub Actions (Reusable Workflow)
 
 Create or update an **ngrok Endpoint** from files in your repo—on every push (or on your schedule). The workflow:
