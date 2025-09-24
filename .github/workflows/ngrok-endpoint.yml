@@ -1,11 +1,7 @@
-name: Create or Update ngrok Endpoint (deployment branch)
+# .github/workflows/ngrok-endpoint.yml
+name: ngrok endpoint
 
 on:
-  # Existing behavior (unchanged): push to "deployment" triggers the workflow
-  push:
-    branches: [ deployment ]
-
-  # New: allow reuse via workflow_call with tunable inputs
   workflow_call:
     inputs:
       config_path:
@@ -14,7 +10,7 @@ on:
         default: "config.yml"
         type: string
       policy_path:
-        description: "Path (or exact file) to the traffic policy; if empty, auto-detects policy.yml/.yaml/.json"
+        description: "Path or glob to the traffic policy; if empty, auto-detects policy.yml/.yaml/.json"
         required: false
         default: ""
         type: string
@@ -34,7 +30,7 @@ on:
         default: "2"
         type: string
       auto_merge:
-        description: "Enable auto-merge for the PR (squash); if false, attempt immediate squash merge"
+        description: "Enable auto-merge for the PR (squash); if false, attempt immediate squash merge is skipped"
         required: false
         default: true
         type: boolean
@@ -46,10 +42,12 @@ permissions:
   contents: write
   pull-requests: write
 
-# Resolve inputs to environment variables; when run from push, inputs.* is undefined,
-# so defaults keep current behavior intact.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
-  # Paths & branches
+  # Paths & branches (defaults preserved)
   CONFIG_PATH: ${{ inputs.config_path || 'config.yml' }}
   POLICY_PATH: ${{ inputs.policy_path || '' }}
   BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
@@ -58,13 +56,9 @@ env:
   NGROK_API_URL: ${{ inputs.ngrok_api_url || 'https://api.ngrok.com/endpoints' }}
   NGROK_API_VERSION: ${{ inputs.ngrok_api_version || '2' }}
 
-  # PR behavior
-  AUTO_MERGE: ${{ (inputs.auto_merge != '' && inputs.auto_merge) || 'true' }}
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # environment: production   # <- optionally set a static Environment here if desired
 
     steps:
       - name: Checkout (current ref)
@@ -83,16 +77,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          # If caller specified POLICY_PATH, use it directly.
+          # If caller specified POLICY_PATH, support exact path or glob
           if [[ -n "${POLICY_PATH}" ]]; then
-            if [[ -f "${POLICY_PATH}" ]]; then
-              echo "Using policy file from input: ${POLICY_PATH}"
-              echo "path=${POLICY_PATH}" >> "$GITHUB_OUTPUT"
-              exit 0
-            else
-              echo "::error::policy_path input '${POLICY_PATH}' does not exist"
+            mapfile -t matches < <(compgen -G "${POLICY_PATH}" || true)
+            if [[ ${#matches[@]} -eq 0 ]]; then
+              echo "::error::policy_path '${POLICY_PATH}' matched no files"
+              exit 1
+            elif [[ ${#matches[@]} -gt 1 ]]; then
+              echo "::error::policy_path '${POLICY_PATH}' matched multiple files: ${matches[*]}"
               exit 1
             fi
+            echo "Using policy file from input: ${matches[0]}"
+            echo "path=${matches[0]}" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           # Otherwise, auto-detect (backwards-compatible)
@@ -146,7 +143,8 @@ jobs:
           # Optional fields
           DESC=$(yq -r '.description // ""' "$CONFIG_PATH")
           META=$(yq -r '.metadata // ""'    "$CONFIG_PATH")
-          POOL=$(yq -r '(.pooling_enabled // "") | tostring' "$CONFIG_PATH")
+          # Keep as native boolean/null; don't coerce to string
+          POOL=$(yq -r ' .pooling_enabled // null ' "$CONFIG_PATH")
           CFG_ID=$(yq -r '.id // ""' "$CONFIG_PATH")
 
           {
@@ -171,8 +169,6 @@ jobs:
             yq -o=json -I=0 '.' "$POLICY_SRC" > /tmp/policy.json
           fi
 
-          # single line, no trailing newline
-          tr -d '\n' < /tmp/policy.json > /tmp/policy.json.tmp && mv /tmp/policy.json.tmp /tmp/policy.json
           echo "path=/tmp/policy.json" >> "$GITHUB_OUTPUT"
 
       - name: Call ngrok API (create or update endpoint)
@@ -213,7 +209,8 @@ jobs:
           if [[ -n "${{ steps.cfg.outputs.meta }}" ]]; then
             DATA+=( --data-urlencode "metadata=${{ steps.cfg.outputs.meta }}" )
           fi
-          if [[ -n "${{ steps.cfg.outputs.pool }}" ]]; then
+          # Only send boolean true/false; skip null/empty
+          if [[ "${{ steps.cfg.outputs.pool }}" == "true" || "${{ steps.cfg.outputs.pool }}" == "false" ]]; then
             DATA+=( --data-urlencode "pooling_enabled=${{ steps.cfg.outputs.pool }}" )
           fi
 
@@ -228,9 +225,10 @@ jobs:
             echo "  --silent --show-error --write-out '%{http_code}'"
           } 1>&2
 
-          # Execute
+          # Execute with retries
           HTTP_CODE=$(
             curl -sS -X "$METHOD" -w "%{http_code}" -o /tmp/resp.json \
+              --retry 5 --retry-delay 2 --retry-connrefused \
               --location "$URL" \
               --header "Content-Type: application/x-www-form-urlencoded" \
               --header "Ngrok-Version: ${NGROK_API_VERSION}" \
@@ -262,7 +260,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin "$BASE_BRANCH"
+          git fetch --quiet origin "$BASE_BRANCH" || { echo "::error::Base branch '${BASE_BRANCH}' not found"; exit 1; }
 
           BRANCH="add-endpoint-id-${NEW_ID}"
           git checkout -B "$BRANCH" "origin/${BASE_BRANCH}"
@@ -293,18 +291,19 @@ jobs:
             --head "${{ steps.commit.outputs.branch }}" \
             --title "chore: add ngrok endpoint id to ${CONFIG_PATH}" \
             --body "This PR adds the newly created ngrok endpoint id to the top of **${CONFIG_PATH}**.<br />Generated automatically by the deployment workflow." \
-            || echo "PR may already exist, continuing."
+            || echo "PR may already exist or creation failed; attempting lookup"
 
           OWNER="${GITHUB_REPOSITORY%/*}"
           REPO="${GITHUB_REPOSITORY#*/}"
           HEAD="${OWNER}:${{ steps.commit.outputs.branch }}"
           PR_JSON=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${OWNER}/${REPO}/pulls?head=${HEAD}&state=open&per_page=1")
+            "https://api.github.com/repos/${OWNER}/${REPO}/pulls?head=${HEAD}&state=open&per_page=1" || true)
           PR_NUMBER=$(echo "$PR_JSON" | jq -r '.[0].number // empty')
           PR_URL=$(echo "$PR_JSON" | jq -r '.[0].html_url // empty')
 
           if [[ -z "$PR_NUMBER" ]]; then
-            echo "::error::Could not determine PR number"; exit 1
+            echo "::warning::No open PR found for head '${HEAD}'. Skipping merge step."
+            exit 0
           fi
 
           {
@@ -312,8 +311,16 @@ jobs:
             echo "url=$PR_URL"
           } >> "$GITHUB_OUTPUT"
 
+          {
+            echo "### ngrok endpoint"
+            echo "- Method: \`${{ steps.api.outputs.method }}\`"
+            echo "- Expected: ${EXPECTED_LABEL}"
+            echo "- Endpoint ID: \`${NEW_ID:-n/a}\`"
+            echo "- PR: ${PR_URL:-n/a}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Enable auto-merge (squash) or merge immediately
-        if: steps.pr.outputs.number != '' && env.AUTO_MERGE == 'true'
+        if: steps.pr.outputs.number != '' && inputs.auto_merge
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -324,3 +331,12 @@ jobs:
             echo "Auto-merge not available; attempting immediate squash merge…"
             gh pr merge "${{ steps.pr.outputs.number }}" --squash --delete-branch
           fi
+
+      - name: Upload debug artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ngrok-api-debug
+          path: |
+            /tmp/resp.json
+            /tmp/policy.json

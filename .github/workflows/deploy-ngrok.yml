@@ -1,4 +1,4 @@
-# .github/workflows/deploy-ngrok.yml in the consumer repo
+# .github/workflows/deploy-ngrok.yml
 name: Deploy ngrok endpoint
 
 on:
@@ -7,8 +7,7 @@ on:
 
 jobs:
   deploy:
-    # Reference the workflow in your published repo
-    uses: iambmelt/Traffic-Policy-Git-Demo/.github/workflows/ngrok-endpoint.yml@v1
+    uses: ./.github/workflows/ngrok-endpoint.yml
     with:
       config_path: ".ngrok/configs/prod.yml"           # overrides CONFIG_PATH
       policy_path: ".ngrok/policies/prod.yaml"         # optional, skip if auto-detect
