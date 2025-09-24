@@ -1,6 +1,6 @@
 # Traffic Policy via GitHub Actions (ngrok)
 
-This repo demonstrates a GitHub Action that reads config from versioned files and creates an **ngrok Endpoint with a Traffic Policy** via the ngrok API—automatically on pushes to the `deployment` branch.
+This repo demonstrates a GitHub Action that reads an Endpoint configuration from a versioned file and creates an **ngrok Endpoint with a Traffic Policy** via the ngrok API—automatically on pushes to the `deployment` branch.
 
 ## What it does
 
