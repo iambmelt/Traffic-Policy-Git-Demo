@@ -11,7 +11,7 @@ jobs:
       contents: write
       pull-requests: write
 
-    uses: iambmelt/Traffic-Policy-Git-Demo/.github/workflows/ngrok-endpoint.yml@f8e3539c53425359d5f2cef0b8f2827c40cd8302
+    uses: ./.github/workflows/ngrok-endpoint.yml
     with:
       config_path: ".ngrok/configs/prod.yml"           # overrides CONFIG_PATH
       policy_path: ".ngrok/policies/prod.yml"         # optional, skip if auto-detect
