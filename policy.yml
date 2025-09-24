@@ -3,3 +3,4 @@ on_http_request:
       - type: deny
         config:
           status_code: 404
+
