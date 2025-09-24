@@ -7,8 +7,11 @@ on:
 
 jobs:
   deploy:
-    # Reuse the workflow from THIS repo at the current commit
-    uses: ./.github/workflows/ngrok-endpoint.yml
+    permissions:
+      contents: write
+      pull-requests: write
+
+    uses: iambmelt/Traffic-Policy-Git-Demo/.github/workflows/ngrok-endpoint.yml@f8e3539c53425359d5f2cef0b8f2827c40cd8302
     with:
       config_path: ".ngrok/configs/prod.yml"           # overrides CONFIG_PATH
       policy_path: ".ngrok/policies/prod.yaml"         # optional, skip if auto-detect
