@@ -315,7 +315,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Enable auto-merge (squash) or merge immediately
-        if: steps.pr.outputs.number != '' && inputs.auto_merge
+        if: steps.pr.outputs.number != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
