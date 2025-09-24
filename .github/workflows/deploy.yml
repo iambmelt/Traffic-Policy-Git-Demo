@@ -1,101 +1,38 @@
 name: Create or Update ngrok Endpoint (deployment branch)
 
 on:
-  # Existing behavior (unchanged): push to "deployment" triggers the workflow
   push:
     branches: [ deployment ]
-
-  # New: allow reuse via workflow_call with tunable inputs
-  workflow_call:
-    inputs:
-      config_path:
-        description: "Path to the ngrok endpoint config file"
-        required: false
-        default: "config.yml"
-        type: string
-      policy_path:
-        description: "Path (or exact file) to the traffic policy; if empty, auto-detects policy.yml/.yaml/.json"
-        required: false
-        default: ""
-        type: string
-      base_branch:
-        description: "Base branch for PRs that record a new endpoint id"
-        required: false
-        default: "main"
-        type: string
-      ngrok_api_url:
-        description: "Override ngrok API base URL"
-        required: false
-        default: "https://api.ngrok.com/endpoints"
-        type: string
-      ngrok_api_version:
-        description: "Ngrok-Version header value"
-        required: false
-        default: "2"
-        type: string
-      auto_merge:
-        description: "Enable auto-merge for the PR (squash); if false, attempt immediate squash merge"
-        required: false
-        default: true
-        type: boolean
-    secrets:
-      NGROK_API_TOKEN:
-        required: true
 
 permissions:
   contents: write
   pull-requests: write
 
-# Resolve inputs to environment variables; when run from push, inputs.* is undefined,
-# so defaults keep current behavior intact.
 env:
-  # Paths & branches
-  CONFIG_PATH: ${{ inputs.config_path || 'config.yml' }}
-  POLICY_PATH: ${{ inputs.policy_path || '' }}
-  BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
-
-  # ngrok API knobs
-  NGROK_API_URL: ${{ inputs.ngrok_api_url || 'https://api.ngrok.com/endpoints' }}
-  NGROK_API_VERSION: ${{ inputs.ngrok_api_version || '2' }}
-
-  # PR behavior
-  AUTO_MERGE: ${{ (inputs.auto_merge != '' && inputs.auto_merge) || 'true' }}
+  NGROK_API_URL: https://api.ngrok.com/endpoints
+  NGROK_API_VERSION: "2"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # environment: production   # <- optionally set a static Environment here if desired
+    # environment: production   # <- uncomment if you’re using an Environment secret
 
     steps:
-      - name: Checkout (current ref)
+      - name: Checkout (deployment branch)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Ensure required files exist
         run: |
-          set -euo pipefail
-          test -f "$CONFIG_PATH" || { echo "::error::Missing $CONFIG_PATH"; exit 1; }
+          set -e
+          test -f config.yml || { echo "::error::Missing config.yml in branch"; exit 1; }
 
-      - name: Detect policy file (honor policy_path input or auto-detect)
+      - name: Detect policy file (policy.yml / policy.yaml / policy.json)
         id: policyfile
         shell: bash
         run: |
           set -euo pipefail
-
-          # If caller specified POLICY_PATH, use it directly.
-          if [[ -n "${POLICY_PATH}" ]]; then
-            if [[ -f "${POLICY_PATH}" ]]; then
-              echo "Using policy file from input: ${POLICY_PATH}"
-              echo "path=${POLICY_PATH}" >> "$GITHUB_OUTPUT"
-              exit 0
-            else
-              echo "::error::policy_path input '${POLICY_PATH}' does not exist"
-              exit 1
-            fi
-          fi
-
-          # Otherwise, auto-detect (backwards-compatible)
           declare -a found=()
           for f in policy.yml policy.yaml policy.json; do
             [[ -f "$f" ]] && found+=("$f")
@@ -107,7 +44,7 @@ jobs:
           fi
 
           if [[ ${#found[@]} -gt 1 ]]; then
-            echo "::error::Multiple policy files found: ${found[*]}. Keep exactly one or set inputs.policy_path."
+            echo "::error::Multiple policy files found: ${found[*]}. Keep exactly one."
             exit 1
           fi
 
@@ -116,7 +53,6 @@ jobs:
 
       - name: Install tools (yq, jq)
         run: |
-          set -euo pipefail
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
           sudo apt-get update -y >/dev/null
@@ -124,30 +60,30 @@ jobs:
           yq --version
           jq --version
 
-      - name: Validate and read config
+      - name: Validate and read config.yml
         id: cfg
         shell: bash
         run: |
           set -euo pipefail
 
           # Required fields
-          URL=$(yq -r '.url // ""'  "$CONFIG_PATH")
-          TYPE=$(yq -r '.type // ""' "$CONFIG_PATH")
+          URL=$(yq -r '.url // ""'  config.yml)
+          TYPE=$(yq -r '.type // ""' config.yml)
 
           if [[ -z "$URL" ]]; then
-            echo "::error::${CONFIG_PATH} is missing required key: url"
+            echo "::error::config.yml is missing required key: url"
             exit 1
           fi
           if [[ -z "$TYPE" ]]; then
-            echo "::error::${CONFIG_PATH} is missing required key: type"
+            echo "::error::config.yml is missing required key: type"
             exit 1
           fi
 
           # Optional fields
-          DESC=$(yq -r '.description // ""' "$CONFIG_PATH")
-          META=$(yq -r '.metadata // ""'    "$CONFIG_PATH")
-          POOL=$(yq -r '(.pooling_enabled // "") | tostring' "$CONFIG_PATH")
-          CFG_ID=$(yq -r '.id // ""' "$CONFIG_PATH")
+          DESC=$(yq -r '.description // ""' config.yml)
+          META=$(yq -r '.metadata // ""'    config.yml)
+          POOL=$(yq -r '(.pooling_enabled // "") | tostring' config.yml)
+          CFG_ID=$(yq -r '.id // ""' config.yml)
 
           {
             echo "url<<__EOF__";  echo -n "$URL";  echo; echo "__EOF__"
@@ -166,8 +102,10 @@ jobs:
           POLICY_SRC='${{ steps.policyfile.outputs.path }}'
 
           if [[ "$POLICY_SRC" == *.json ]]; then
+            # Validate/compact JSON
             jq -c . "$POLICY_SRC" > /tmp/policy.json
           else
+            # YAML -> JSON
             yq -o=json -I=0 '.' "$POLICY_SRC" > /tmp/policy.json
           fi
 
@@ -254,7 +192,7 @@ jobs:
             echo "id=${NEW_ID}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Prepare commit with new id on a branch from base branch
+      - name: Prepare commit with new id on a branch from main
         id: commit
         if: steps.api.outputs.created == 'true' && steps.api.outputs.id != ''
         env:
@@ -262,25 +200,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin "$BASE_BRANCH"
+          git fetch origin main
 
           BRANCH="add-endpoint-id-${NEW_ID}"
-          git checkout -B "$BRANCH" "origin/${BASE_BRANCH}"
+          git checkout -B "$BRANCH" origin/main
 
-          # Put id at the very top of the config file (remove any existing id if present)
-          yq 'del(.id)' "$CONFIG_PATH" > /tmp/config.noid.yml || cp "$CONFIG_PATH" /tmp/config.noid.yml
-          printf "id: %s\n" "$NEW_ID" > "$CONFIG_PATH"
-          cat /tmp/config.noid.yml >> "$CONFIG_PATH"
+          # Put id at the very top of config.yml (remove any existing id if present)
+          yq 'del(.id)' config.yml > /tmp/config.noid.yml || cp config.yml /tmp/config.noid.yml
+          printf "id: %s\n" "$NEW_ID" > config.yml
+          cat /tmp/config.noid.yml >> config.yml
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "$CONFIG_PATH"
-          git commit -m "chore: record ngrok endpoint id ${NEW_ID} in ${CONFIG_PATH}"
+          git add config.yml
+          git commit -m "chore: record ngrok endpoint id ${NEW_ID} in config.yml"
           git push -u origin "$BRANCH"
 
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      - name: Open PR to base branch
+      - name: Open PR to main
         id: pr
         if: steps.api.outputs.created == 'true' && steps.api.outputs.id != ''
         env:
@@ -289,10 +227,10 @@ jobs:
         run: |
           set -euo pipefail
           gh pr create \
-            --base "${BASE_BRANCH}" \
+            --base main \
             --head "${{ steps.commit.outputs.branch }}" \
-            --title "chore: add ngrok endpoint id to ${CONFIG_PATH}" \
-            --body "This PR adds the newly created ngrok endpoint id to the top of **${CONFIG_PATH}**.<br />Generated automatically by the deployment workflow." \
+            --title "chore: add ngrok endpoint id to config.yml" \
+            --body "This PR adds the newly created ngrok endpoint id to the top of **config.yml**.<br />Generated automatically by the deployment workflow." \
             || echo "PR may already exist, continuing."
 
           OWNER="${GITHUB_REPOSITORY%/*}"
@@ -313,7 +251,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Enable auto-merge (squash) or merge immediately
-        if: steps.pr.outputs.number != '' && env.AUTO_MERGE == 'true'
+        if: steps.pr.outputs.number != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
