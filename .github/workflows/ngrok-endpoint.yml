@@ -186,13 +186,11 @@ jobs:
             URL="${NGROK_API_URL}/${{ steps.cfg.outputs.cfg_id }}"
             CREATED="false"
             EXPECTED=200
-            EXPECTED_LABEL="200 OK"
           else
             METHOD="POST"
             URL="${NGROK_API_URL}"
             CREATED="true"
             EXPECTED=201
-            EXPECTED_LABEL="201 Created"
           fi
 
           # Build form data (omit type on PATCH)
@@ -216,7 +214,7 @@ jobs:
 
           # Preview (token redacted)
           {
-            echo "About to run this request (expecting ${EXPECTED_LABEL}):"
+            echo "About to run this request (expecting HTTP ${EXPECTED}):"
             printf "curl --request %s --location %q \\\n" "$METHOD" "$URL"
             printf "  --header %q \\\n" "Content-Type: application/x-www-form-urlencoded"
             printf "  --header %q \\\n" "Ngrok-Version: ${NGROK_API_VERSION}"
@@ -241,7 +239,7 @@ jobs:
 
           # Strict status check
           if [[ "${HTTP_CODE}" -ne "${EXPECTED}" ]]; then
-            echo "::error::Unexpected status. Got ${HTTP_CODE}, expected ${EXPECTED_LABEL} for ${METHOD}."
+            echo "::error::Unexpected status. Got ${HTTP_CODE}, expected HTTP ${EXPECTED} for ${METHOD}."
             exit 1
           fi
 
@@ -252,7 +250,6 @@ jobs:
             echo "method=${METHOD}"
             echo "created=${CREATED}"
             echo "id=${NEW_ID}"
-            echo "expected_label=${EXPECTED_LABEL}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare commit with new id on a branch from base branch
