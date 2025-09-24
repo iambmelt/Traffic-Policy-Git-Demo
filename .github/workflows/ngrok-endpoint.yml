@@ -288,7 +288,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           METHOD: ${{ steps.api.outputs.method }}
-          EXPECTED_LABEL: ${{ steps.api.outputs.expected_label }}
           NEW_ID: ${{ steps.api.outputs.id }}
         shell: bash
         run: |
