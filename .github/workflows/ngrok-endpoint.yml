@@ -318,15 +318,6 @@ jobs:
             echo "url=$PR_URL"
           } >> "$GITHUB_OUTPUT"
 
-          # Optional summary (now safe, variables are set via env and -u is disabled)
-          {
-            echo "### ngrok endpoint"
-            echo "- Method: \`${METHOD}\`"
-            echo "- Expected: ${EXPECTED_LABEL}"
-            echo "- Endpoint ID: \`${NEW_ID:-n/a}\`"
-            echo "- PR: ${PR_URL:-n/a}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Enable auto-merge (squash) or merge immediately
         if: steps.pr.outputs.number != '' && inputs.auto_merge
         env:
