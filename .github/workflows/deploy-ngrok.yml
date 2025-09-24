@@ -7,6 +7,7 @@ on:
 
 jobs:
   deploy:
+    # Reuse the workflow from THIS repo at the current commit
     uses: ./.github/workflows/ngrok-endpoint.yml
     with:
       config_path: ".ngrok/configs/prod.yml"           # overrides CONFIG_PATH
