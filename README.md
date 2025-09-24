@@ -11,7 +11,7 @@ You can run it inside the same repo or call it from another repo as a reusable w
 
 ---
 
-## 1) What this action does (in plain English)
+## 1) What this action does
 
 * **Turns config + policy files into a live ngrok endpoint.**
 * **First run:** creates the endpoint; records its `id` in your config via an auto-opened PR.
