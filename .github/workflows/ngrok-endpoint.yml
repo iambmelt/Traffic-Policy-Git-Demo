@@ -247,7 +247,7 @@ jobs:
 
           NEW_ID=$(jq -r '.id // empty' /tmp/resp.json)
 
-          # Expose outputs for later steps (incl. EXPECTED_LABEL for PR summary)
+          # Expose outputs for later steps
           {
             echo "method=${METHOD}"
             echo "created=${CREATED}"
@@ -281,14 +281,12 @@ jobs:
 
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
+      # --- PR creation & merge logic copied from the older working version (adapted to BASE_BRANCH/CONFIG_PATH) ---
       - name: Open PR to base branch
         id: pr
         if: steps.api.outputs.created == 'true' && steps.api.outputs.id != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          METHOD: ${{ steps.api.outputs.method }}
-          EXPECTED_LABEL: ${{ steps.api.outputs.expected_label }}
-          NEW_ID: ${{ steps.api.outputs.id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -297,33 +295,24 @@ jobs:
             --head "${{ steps.commit.outputs.branch }}" \
             --title "chore: add ngrok endpoint id to ${CONFIG_PATH}" \
             --body "This PR adds the newly created ngrok endpoint id to the top of **${CONFIG_PATH}**.<br />Generated automatically by the deployment workflow." \
-            || echo "PR may already exist or creation failed; attempting lookup"
+            || echo "PR may already exist, continuing."
 
           OWNER="${GITHUB_REPOSITORY%/*}"
           REPO="${GITHUB_REPOSITORY#*/}"
           HEAD="${OWNER}:${{ steps.commit.outputs.branch }}"
           PR_JSON=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${OWNER}/${REPO}/pulls?head=${HEAD}&state=open&per_page=1" || true)
+            "https://api.github.com/repos/${OWNER}/${REPO}/pulls?head=${HEAD}&state=open&per_page=1")
           PR_NUMBER=$(echo "$PR_JSON" | jq -r '.[0].number // empty')
           PR_URL=$(echo "$PR_JSON" | jq -r '.[0].html_url // empty')
 
           if [[ -z "$PR_NUMBER" ]]; then
-            echo "::warning::No open PR found for head '${HEAD}'. Skipping merge step."
-            exit 0
+            echo "::error::Could not determine PR number"; exit 1
           fi
 
           {
             echo "number=$PR_NUMBER"
             echo "url=$PR_URL"
           } >> "$GITHUB_OUTPUT"
-
-          {
-            echo "### ngrok endpoint"
-            echo "- Method: \`${METHOD}\`"
-            echo "- Expected: ${EXPECTED_LABEL}"
-            echo "- Endpoint ID: \`${NEW_ID:-n/a}\`"
-            echo "- PR: ${PR_URL:-n/a}"
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enable auto-merge (squash) or merge immediately
         if: steps.pr.outputs.number != '' && inputs.auto_merge
