@@ -1,4 +1,4 @@
-# Deploy ngrok Endpoint via GitHub Actions (Reusable Workflow)
+# Deploy ngrok Endpoints via GitHub Actions (Reusable Workflow)
 
 Create or update an **ngrok Endpoint** from files in your repo—on every push (or on your schedule). The workflow:
 
