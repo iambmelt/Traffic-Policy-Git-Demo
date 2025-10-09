@@ -15,12 +15,12 @@ on:
         default: ""
         type: string
       base_branch:
-        description: "Base branch for PRs that record a new endpoint id"
+        description: "Base branch to open PRs against when recording a new id"
         required: false
         default: "main"
         type: string
       ngrok_api_url:
-        description: "Override ngrok API base URL"
+        description: "Override the ngrok API base url for endpoints"
         required: false
         default: "https://api.ngrok.com/endpoints"
         type: string
@@ -30,86 +30,27 @@ on:
         default: "2"
         type: string
       auto_merge:
-        description: "Enable auto-merge for the PR (squash); if false, skip merge step"
+        description: "Enable PR auto-merge when recording a new id"
         required: false
-        default: true
+        default: false
         type: boolean
     secrets:
       NGROK_API_TOKEN:
         required: true
 
-permissions:
-  contents: write
-  pull-requests: write
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  # Paths & branches (defaults preserved)
-  CONFIG_PATH: ${{ inputs.config_path || 'config.yml' }}
-  POLICY_PATH: ${{ inputs.policy_path || '' }}
-  BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
-
-  # ngrok API knobs
-  NGROK_API_URL: ${{ inputs.ngrok_api_url || 'https://api.ngrok.com/endpoints' }}
-  NGROK_API_VERSION: ${{ inputs.ngrok_api_version || '2' }}
-
 jobs:
-  deploy:
+  run:
     runs-on: ubuntu-latest
+    env:
+      CONFIG_PATH: ${{ inputs.config_path }}
+      POLICY_PATH: ${{ inputs.policy_path }}
+      BASE_BRANCH: ${{ inputs.base_branch }}
+      NGROK_API_URL: ${{ inputs.ngrok_api_url }}
+      NGROK_API_VERSION: ${{ inputs.ngrok_api_version }}
+      AUTO_MERGE: ${{ inputs.auto_merge }}
 
     steps:
-      - name: Checkout (current ref)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Ensure required files exist
-        run: |
-          set -euo pipefail
-          test -f "$CONFIG_PATH" || { echo "::error::Missing $CONFIG_PATH"; exit 1; }
-
-      - name: Detect policy file (honor policy_path input or auto-detect)
-        id: policyfile
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # If caller specified POLICY_PATH, support exact path or glob
-          if [[ -n "${POLICY_PATH}" ]]; then
-            mapfile -t matches < <(compgen -G "${POLICY_PATH}" || true)
-            if [[ ${#matches[@]} -eq 0 ]]; then
-              echo "::error::policy_path '${POLICY_PATH}' matched no files"
-              exit 1
-            elif [[ ${#matches[@]} -gt 1 ]]; then
-              echo "::error::policy_path '${POLICY_PATH}' matched multiple files: ${matches[*]}"
-              exit 1
-            fi
-            echo "Using policy file from input: ${matches[0]}"
-            echo "path=${matches[0]}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Otherwise, auto-detect (backwards-compatible)
-          declare -a found=()
-          for f in policy.yml policy.yaml policy.json; do
-            [[ -f "$f" ]] && found+=("$f")
-          done
-
-          if [[ ${#found[@]} -eq 0 ]]; then
-            echo "::error::No policy file found. Add one of: policy.yml, policy.yaml, or policy.json"
-            exit 1
-          fi
-
-          if [[ ${#found[@]} -gt 1 ]]; then
-            echo "::error::Multiple policy files found: ${found[*]}. Keep exactly one or set inputs.policy_path."
-            exit 1
-          fi
-
-          echo "Using policy file: ${found[0]}"
-          echo "path=${found[0]}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
 
       - name: Install tools (yq, jq)
         run: |
@@ -127,34 +68,63 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Required fields
-          URL=$(yq -r '.url // ""'  "$CONFIG_PATH")
-          TYPE=$(yq -r '.type // ""' "$CONFIG_PATH")
-
-          if [[ -z "$URL" ]]; then
-            echo "::error::${CONFIG_PATH} is missing required key: url"
+          if [[ ! -f "$CONFIG_PATH" ]]; then
+            echo "::error::Config not found at $CONFIG_PATH"
             exit 1
           fi
-          if [[ -z "$TYPE" ]]; then
-            echo "::error::${CONFIG_PATH} is missing required key: type"
+
+          # Normalize to JSON for easy extraction
+          yq -o=json -I=0 '.' "$CONFIG_PATH" > /tmp/config.json
+
+          # Required fields
+          URL=$(jq -r '.url // empty' /tmp/config.json)
+          TYPE=$(jq -r '.type // "cloud"' /tmp/config.json)
+          if [[ -z "$URL" ]]; then
+            echo "::error::Missing required field: url"
             exit 1
           fi
 
           # Optional fields
-          DESC=$(yq -r '.description // ""' "$CONFIG_PATH")
-          META=$(yq -r '.metadata // ""'    "$CONFIG_PATH")
-          # Keep as native boolean/null; don't coerce to string
-          POOL=$(yq -r ' .pooling_enabled // null ' "$CONFIG_PATH")
-          CFG_ID=$(yq -r '.id // ""' "$CONFIG_PATH")
+          ID=$(jq -r '.id // empty' /tmp/config.json)
+          DESC=$(jq -r '.description // empty' /tmp/config.json)
+          META=$(jq -c '.metadata // empty' /tmp/config.json)
+          POOL=$(jq -r '.pooling_enabled // empty' /tmp/config.json)
 
           {
-            echo "url<<__EOF__";  echo -n "$URL";  echo; echo "__EOF__"
-            echo "type=$TYPE"
-            echo "desc<<__EOF__"; echo -n "$DESC"; echo; echo "__EOF__"
-            echo "meta<<__EOF__"; echo -n "$META"; echo; echo "__EOF__"
-            echo "pool=$POOL"
-            echo "cfg_id=$CFG_ID"
+            echo "cfg_id=${ID}"
+            echo "url=${URL}"
+            echo "type=${TYPE}"
+            echo "desc=${DESC}"
+            echo "meta=${META}"
+            echo "pool=${POOL}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Find traffic policy file
+        id: policyfile
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$POLICY_PATH" ]]; then
+            FILES=( $(compgen -G "$POLICY_PATH" || true) )
+          else
+            FILES=(policy.yml policy.yaml policy.json)
+          fi
+
+          CANDIDATES=()
+          for f in "${FILES[@]}"; do
+            [[ -f "$f" ]] && CANDIDATES+=("$f")
+          done
+
+          if [[ "${#CANDIDATES[@]}" -eq 0 ]]; then
+            echo "::error::No traffic policy file found (looked for: $POLICY_PATH or policy.yml/.yaml/.json)"
+            exit 1
+          elif [[ "${#CANDIDATES[@]}" -gt 1 ]]; then
+            echo "::error::Multiple traffic policy files detected: ${CANDIDATES[*]}"
+            exit 1
+          fi
+
+          echo "path=${CANDIDATES[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Build traffic policy JSON from detected file
         id: policy
@@ -237,10 +207,80 @@ jobs:
           echo "HTTP ${HTTP_CODE}"
           (jq -C . /tmp/resp.json || cat /tmp/resp.json)
 
-          # Strict status check
+          # Strict status check (with recovery for single-endpoint intent)
           if [[ "${HTTP_CODE}" -ne "${EXPECTED}" ]]; then
-            echo "::error::Unexpected status. Got ${HTTP_CODE}, expected HTTP ${EXPECTED} for ${METHOD}."
-            exit 1
+            # If we attempted to CREATE (POST) and got a 400 ERR_NGROK_18017,
+            # recover by finding the existing endpoint for this URL and PATCHing it instead.
+            # Tradeoff: we intentionally do NOT support option 2.B (pooling multiple endpoints on the same URL).
+            # That means if the caller *intended* pooling, this recovery will keep a single endpoint and update it in-place.
+            if [[ "${METHOD}" == "POST" && "${HTTP_CODE}" -eq 400 ]]; then
+              ERR_CODE=$(jq -r '.error_code // empty' /tmp/resp.json || true)
+              if [[ "${ERR_CODE}" == "ERR_NGROK_18017" ]]; then
+                echo "Encountered ERR_NGROK_18017 (endpoint exists at URL without pooling). Attempting PATCH of existing endpoint…"
+                TARGET_URL=${{ steps.cfg.outputs.url }}
+
+                # Walk pages to find existing endpoint with this URL
+                NEXT=""
+                FOUND_ID=""
+                while :; do
+                  LIST_URL="${NGROK_API_URL}"
+                  if [[ -n "${NEXT}" ]]; then
+                    LIST_URL="${LIST_URL}?before_id=${NEXT}"
+                  fi
+                  LIST_CODE=$(
+                    curl -sS -X GET -w "%{http_code}" -o /tmp/list.json \
+                      --location "${LIST_URL}" \
+                      --header "Ngrok-Version: ${NGROK_API_VERSION}" \
+                      --header "Authorization: Bearer ${TOKEN}"
+                  )
+                  if [[ "${LIST_CODE}" -ne 200 ]]; then
+                    echo "::error::Failed to list endpoints while recovering from ERR_NGROK_18017 (HTTP ${LIST_CODE})."
+                    break
+                  fi
+                  FOUND_ID=$(jq -r --arg u "${TARGET_URL}" '.endpoints[]? | select(.url == $u) | .id' /tmp/list.json | head -n1 || true)
+                  if [[ -n "${FOUND_ID}" ]]; then
+                    break
+                  fi
+                  NEXT=$(jq -r '.next_id // empty' /tmp/list.json || true)
+                  if [[ -z "${NEXT}" ]]; then
+                    break
+                  fi
+                done
+
+                if [[ -z "${FOUND_ID}" ]]; then
+                  echo "::error::Could not find an existing endpoint for URL '${TARGET_URL}' to PATCH. Failing."
+                  exit 1
+                fi
+
+                METHOD="PATCH"
+                URL="${NGROK_API_URL}/${FOUND_ID}"
+                CREATED="false"
+                EXPECTED=200
+
+                # Re-issue the request as PATCH with same DATA
+                HTTP_CODE=$(
+                  curl -sS -X "$METHOD" -w "%{http_code}" -o /tmp/resp.json \
+                    --location "$URL" \
+                    --header "Content-Type: application/x-www-form-urlencoded" \
+                    --header "Ngrok-Version: ${NGROK_API_VERSION}" \
+                    --header "Authorization: Bearer ${TOKEN}" \
+                    "${DATA[@]}"
+                )
+                echo "HTTP ${HTTP_CODE} (after recovery PATCH)"
+                (jq -C . /tmp/resp.json || cat /tmp/resp.json)
+
+                if [[ "${HTTP_CODE}" -ne "${EXPECTED}" ]]; then
+                  echo "::error::Recovery PATCH failed. Got ${HTTP_CODE}, expected HTTP ${EXPECTED}."
+                  exit 1
+                fi
+              else
+                echo "::error::Unexpected 4xx from create; not ERR_NGROK_18017. Failing."
+                exit 1
+              fi
+            else
+              echo "::error::Unexpected status. Got ${HTTP_CODE}, expected HTTP ${EXPECTED} for ${METHOD}."
+              exit 1
+            fi
           fi
 
           NEW_ID=$(jq -r '.id // empty' /tmp/resp.json)
@@ -273,55 +313,28 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$CONFIG_PATH"
-          git commit -m "chore: record ngrok endpoint id ${NEW_ID} in ${CONFIG_PATH}"
-          git push -u origin "$BRANCH"
+          git commit -m "chore: record new ngrok endpoint id ${NEW_ID}"
 
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-
-      # PR creation & merge logic with correct variable scope and no 'set -u'
       - name: Open PR to base branch
         id: pr
-        if: steps.api.outputs.created == 'true' && steps.api.outputs.id != ''
+        if: steps.commit.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          METHOD: ${{ steps.api.outputs.method }}
-          NEW_ID: ${{ steps.api.outputs.id }}
-        shell: bash
         run: |
-          set -eo pipefail
-          gh pr create \
-            --base "${BASE_BRANCH}" \
-            --head "${{ steps.commit.outputs.branch }}" \
-            --title "chore: add ngrok endpoint id to ${CONFIG_PATH}" \
-            --body "This PR adds the newly created ngrok endpoint id to the top of **${CONFIG_PATH}**.<br />Generated automatically by the deployment workflow." \
-            || echo "PR may already exist or creation failed; attempting lookup"
-
-          OWNER="${GITHUB_REPOSITORY%/*}"
-          REPO="${GITHUB_REPOSITORY#*/}"
-          HEAD="${OWNER}:${{ steps.commit.outputs.branch }}"
-          PR_JSON=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${OWNER}/${REPO}/pulls?head=${HEAD}&state=open&per_page=1" || true)
-          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.[0].number // empty')
-          PR_URL=$(echo "$PR_JSON" | jq -r '.[0].html_url // empty')
-
-          if [[ -z "$PR_NUMBER" ]]; then
-            echo "::warning::No open PR found for head '${HEAD}'. Skipping merge step."
-            exit 0
-          fi
-
-          {
-            echo "number=$PR_NUMBER"
-            echo "url=$PR_URL"
-          } >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          gh pr create --title "Record ngrok endpoint id ${NEW_ID}" \
+            --body "Created by a GitHub Action. This PR writes the new endpoint id to ${CONFIG_PATH}." \
+            --base "${BASE_BRANCH}" --head "$(git branch --show-current)" \
+            --fill
 
       - name: Enable auto-merge (squash) or merge immediately
-        if: steps.pr.outputs.number != '' && inputs.auto_merge
+        if: steps.pr.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
         run: |
-          set -eo pipefail
-          if gh pr merge "${{ steps.pr.outputs.number }}" --squash --auto --delete-branch; then
+          set -euo pipefail
+          if [[ "${AUTO_MERGE}" == "true" ]]; then
+            gh pr merge "${{ steps.pr.outputs.number }}" --auto --squash --delete-branch
             echo "Auto-merge enabled; PR will merge when checks pass."
           else
             echo "Auto-merge not available; attempting immediate squash merge…"
