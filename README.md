@@ -16,7 +16,6 @@ You can run it inside the same repo or call it from another repo as a reusable w
 * **Turns config + policy files into a live ngrok endpoint.**
 * **First run:** creates the endpoint; records its `id` in your config via an auto-opened PR.
 * **Later runs:** sees the `id` and updates that endpoint (no PR).
-* **Safe for production:** runs with least-privilege permissions, supports branch protection, and can auto-merge the PR when allowed.
 
 ---
 
